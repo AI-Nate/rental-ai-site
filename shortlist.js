@@ -53,6 +53,20 @@ export function buildListingSearchQueries(input = {}) {
   }));
 }
 
+
+export function searchResultsToListingText(results = []) {
+  return results
+    .map((result) => {
+      const title = clean(result.title);
+      const link = clean(result.link || result.url);
+      const source = clean(result.source) || sourceFromUrl(link);
+      const snippet = clean(result.snippet || result.description);
+      return [title, link, source ? `Source: ${source}` : '', snippet].filter(Boolean).join('\n');
+    })
+    .filter(Boolean)
+    .join('\n\n---\n\n');
+}
+
 export function parseListingsFromText(text) {
   const raw = clean(text);
   if (!raw) return [];
@@ -133,8 +147,9 @@ function extractTitle(lines, { url, rent, address }) {
 }
 
 function extractRent(text) {
-  const rentMatch = text.match(/(?:rent|monthly|price)\D{0,24}\$?([1-9][0-9]{2,5}(?:,[0-9]{3})?)/i)
-    || text.match(/\$([1-9][0-9]{2,5}(?:,[0-9]{3})?)\s*(?:\/\s*mo|per month|monthly|rent)?/i);
+  const rentAmountPattern = '([1-9][0-9]{0,2}(?:,[0-9]{3})+|[1-9][0-9]{2,5})';
+  const rentMatch = text.match(new RegExp(`(?:rent|monthly|price)\\D{0,24}\\$?${rentAmountPattern}`, 'i'))
+    || text.match(new RegExp(`\\$${rentAmountPattern}\\s*(?:\\/\\s*mo|per month|monthly|rent)?`, 'i'));
   return rentMatch ? moneyToNumber(rentMatch[1]) : null;
 }
 
@@ -149,16 +164,20 @@ function extractOneTimeFees(text) {
 function extractRecurringFees(text) {
   const fees = [
     feeFromText(text, /internet|wi[- ]?fi|broadband/i, 'internet'),
-    feeFromText(text, /pet rent|pet fee|dog|cat/i, 'pet rent'),
+    feeFromText(text, /pet rent|pet fee/i, 'pet rent'),
     feeFromText(text, /parking|garage/i, 'parking'),
-    feeFromText(text, /electric|gas|heat|water|utilities/i, 'utilities'),
-    feeFromText(text, /laundry|washer|dryer|w\/d/i, 'laundry')
+    feeFromText(text, /electric|gas|heat|water|utilities/i, 'utilities')
   ].filter(Boolean);
-  if (/utilities included|heat included|hot water included/i.test(text) && !fees.some((fee) => /util|heat|water/.test(fee.label))) fees.push({ label: 'utilities included', amount: 0 });
-  if (/no parking|no car/i.test(text) && !fees.some((fee) => /parking/.test(fee.label))) fees.push({ label: 'no parking needed', amount: 0 });
-  if (/no pets|cats ok|dogs ok|pet friendly/i.test(text) && !fees.some((fee) => /pet/.test(fee.label))) fees.push({ label: 'pet policy mentioned', amount: 0 });
-  if (/laundry/i.test(text) && !fees.some((fee) => /laundry/.test(fee.label))) fees.push({ label: 'laundry mentioned', amount: 0 });
+  if (/utilities included|heat included|hot water included/i.test(text)) upsertKnownFee(fees, /util|heat|water/, { label: 'utilities included', amount: 0 });
+  if (/no parking|no car/i.test(text)) upsertKnownFee(fees, /parking/, { label: 'no parking needed', amount: 0 });
+  if (/pet rent included|no pet fee|no pet rent/i.test(text)) upsertKnownFee(fees, /pet/, { label: 'pet rent included', amount: 0 });
   return fees;
+}
+
+function upsertKnownFee(fees, labelPattern, knownFee) {
+  const existing = fees.find((fee) => labelPattern.test(fee.label));
+  if (existing) existing.amount = knownFee.amount;
+  else fees.push(knownFee);
 }
 
 function feeFromText(text, pattern, label) {
@@ -523,7 +542,7 @@ function affordabilityLabel(estimatedMonthlyCost, budget, { rent, missingRecurri
 }
 
 function missingRecurringCosts(listing, recurringFees) {
-  const labels = recurringFees.map((fee) => lower(fee.label));
+  const labels = recurringFees.filter((fee) => Number.isFinite(fee.amount)).map((fee) => lower(fee.label));
   const missing = [];
   const text = listingText(listing);
   if (!labels.some((label) => /util|water|trash|electric|gas|heat|internet/.test(label)) && !/utilities included|tenant pays|water|trash|electric|gas|heat included/i.test(text)) missing.push('utilities / monthly services');

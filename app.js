@@ -1,4 +1,4 @@
-import { LIVE_SITE_URL, analyzeSearch, buildListingSearchQueries, createFeedbackRecord, parseListingsFromText } from './shortlist.js';
+import { LIVE_SITE_URL, analyzeSearch, buildListingSearchQueries, createFeedbackRecord, parseListingsFromText, searchResultsToListingText } from './shortlist.js';
 
 const STORAGE_KEY = 'rental-ai-trial-feedback-v3';
 const CTA_KEY = 'rental-ai-live-cta-clicked';
@@ -98,6 +98,7 @@ const app = document.querySelector('#app');
 let currentAnalysis = null;
 let currentSearchPlan = [];
 let currentParsedListings = [];
+let searchStatus = '';
 
 const state = {
   targetArea: 'Astoria / Crown Heights / Lower East Side, NYC',
@@ -167,7 +168,8 @@ function render() {
         </label>
         <div class="actions full">
           <button type="submit">Build search plan</button>
-          <p class="hint">We’ll generate targeted listing searches from these answers. If a search API is connected later, this step can fetch candidates automatically; today it falls back to one-click search links and plain-text paste.</p>
+          <button id="auto-search" class="secondary" type="button">Search automatically if available</button>
+          <p class="hint">We’ll generate targeted listing searches from these answers. If <code>SERPAPI_API_KEY</code> is configured on the server, automatic search can fetch candidates; otherwise the app falls back to one-click search links and plain-text paste.</p>
         </div>
       </form>
     </section>
@@ -215,7 +217,13 @@ function render() {
     event.preventDefault();
     updateNeedsFromForm(event.currentTarget);
     currentSearchPlan = buildListingSearchQueries(state);
+    searchStatus = '';
     renderSearchPlan();
+  });
+  document.querySelector('#auto-search').addEventListener('click', async () => {
+    updateNeedsFromForm(document.querySelector('#needs-form'));
+    currentSearchPlan = buildListingSearchQueries(state);
+    await runAutomaticSearch();
   });
   document.querySelector('#analysis-form').addEventListener('submit', (event) => {
     event.preventDefault();
@@ -248,8 +256,9 @@ function renderSearchPlan() {
     <div class="section-heading">
       <div>
         <p class="eyebrow">Search plan</p>
-        <h2>Open targeted searches, then paste promising listings below</h2>
-        <p class="hint">Automatic API search is not connected in this static build, so this is the graceful fallback: targeted searches plus no-JSON analysis. Owner action needed for true background fetching is listed in the handoff report.</p>
+        <h2>Search automatically when configured, or use fallback links</h2>
+        <p class="hint">If this app is served by the local Rental AI server with <code>SERPAPI_API_KEY</code>, automatic search fetches real web results. On static hosting or without the key, use these targeted links and paste listing text below.</p>
+        ${searchStatus ? `<p class="search-status">${escapeText(searchStatus)}</p>` : ''}
       </div>
       <div class="budget-chip">${currentSearchPlan.length} searches</div>
     </div>
@@ -257,6 +266,39 @@ function renderSearchPlan() {
       ${currentSearchPlan.map((item) => `<a class="search-link" href="${escapeAttr(item.url)}" target="_blank" rel="noreferrer"><strong>${escapeText(item.label)}</strong><span>${escapeText(item.query)}</span></a>`).join('')}
     </div>
   `;
+}
+
+
+async function runAutomaticSearch() {
+  searchStatus = 'Searching listing sources…';
+  renderSearchPlan();
+  const button = document.querySelector('#auto-search');
+  if (button) button.disabled = true;
+  try {
+    const response = await fetch('./api/listing-search', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(state)
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.message || payload.error || 'Automatic search is unavailable from this deployment.');
+    }
+    const listingText = searchResultsToListingText(payload.results || []);
+    if (!listingText) throw new Error('Automatic search returned no usable listing snippets.');
+    state.listingText = listingText;
+    const textarea = document.querySelector('textarea[name="listingText"]');
+    if (textarea) textarea.value = state.listingText;
+    searchStatus = `Automatic search found ${(payload.results || []).length} candidate snippets. Unknown listing fields are left blank until the listing text states them.`;
+    renderSearchPlan();
+    runAnalysis();
+  } catch (error) {
+    searchStatus = `${error.message} Fallback: open the targeted search links and paste 3–10 listing snippets or URLs below.`;
+    renderSearchPlan();
+  } finally {
+    const latestButton = document.querySelector('#auto-search');
+    if (latestButton) latestButton.disabled = false;
+  }
 }
 
 function runAnalysis() {
