@@ -1,15 +1,19 @@
 const HIGH_RISK_SOURCE_PATTERN = /(craigslist|facebook|fb marketplace|marketplace)/i;
 const WIRE_PAYMENT_PATTERN = /(wire|western union|moneygram|gift card|cashapp|zelle|crypto|bitcoin|venmo)/i;
-const BEFORE_TOUR_PATTERN = /(before (a )?(tour|viewing|showing)|prior to (viewing|showing)|hold(ing)? deposit|reserve)/i;
-const INTERNET_PATTERN = /(internet|fiber|wi[- ]?fi|broadband|remote work)/i;
+const BEFORE_TOUR_PATTERN = /(before (a )?(tour|viewing|showing)|prior to (viewing|showing)|hold(ing)? deposit|reserve|sight unseen)/i;
+const INTERNET_PATTERN = /(internet|fiber|wi[- ]?fi|broadband|remote work|work from home)/i;
 const PARKING_PATTERN = /parking|garage|street permit/i;
 const PET_PATTERN = /pet|dog|cat/i;
 const LAUNDRY_PATTERN = /laundry|washer|dryer|w\/d/i;
+const NYC_BOROUGH_PATTERN = /(manhattan|brooklyn|queens|bronx|staten island|nyc|new york)/i;
+
+export const LIVE_SITE_URL = 'https://ai-nate.github.io/rental-ai-site/';
 
 export const AFFORDABILITY = Object.freeze({
   WITHIN: 'within budget',
   NEAR: 'near limit',
-  OVER: 'over budget'
+  OVER: 'over budget',
+  MISSING: 'missing cost data'
 });
 
 export const RISK = Object.freeze({
@@ -27,17 +31,24 @@ export const RECOMMENDATION = Object.freeze({
 export function analyzeSearch(input) {
   const normalized = normalizeSearchInput(input);
   const analyzed = normalized.listings.map((listing, index) => analyzeListing(normalized, listing, index));
+  const recommendationMix = analyzed.reduce((mix, listing) => {
+    mix[listing.recommendation] = (mix[listing.recommendation] || 0) + 1;
+    return mix;
+  }, {});
+
   return {
     targetArea: normalized.targetArea,
     monthlyBudget: normalized.monthlyBudget,
     commuteDestination: normalized.commuteDestination,
     commuteThresholdMinutes: normalized.commuteThresholdMinutes,
     listingCount: analyzed.length,
+    recommendationMix,
     shortlist: [...analyzed]
       .sort((a, b) => b.score.total - a.score.total || a.estimatedMonthlyCost - b.estimatedMonthlyCost)
       .slice(0, 5),
     allListings: analyzed,
-    generatedAt: new Date().toISOString()
+    generatedAt: new Date().toISOString(),
+    liveSiteUrl: LIVE_SITE_URL
   };
 }
 
@@ -55,7 +66,7 @@ export function normalizeSearchInput(input) {
   }
 
   return {
-    targetArea: clean(input?.targetArea) || 'Target area not specified',
+    targetArea: clean(input?.targetArea) || 'NYC neighborhood or borough not specified',
     monthlyBudget,
     commuteDestination: clean(input?.commuteDestination),
     commuteThresholdMinutes,
@@ -84,15 +95,15 @@ export function analyzeListing(search, listing, index = 0) {
   missing.push(...missingRecurring);
   if (missingRecurring.length) evidence.push(`Missing recurring cost details: ${missingRecurring.join(', ')}.`);
 
-  const affordability = affordabilityLabel(estimatedMonthlyCost, search.monthlyBudget);
-  evidence.push(`Known monthly estimate is ${formatMoney(estimatedMonthlyCost)} vs. ${formatMoney(search.monthlyBudget)} budget (${affordability}).`);
-
   const feeChecklist = buildFeeChecklist(listing, oneTimeFees);
   const trustChecklist = buildTrustChecklist(search, listing, estimatedMonthlyCost);
-  const risk = riskLabel(feeChecklist, trustChecklist);
   const localFit = buildLocalFit(search, listing);
-  const score = scoreListing({ search, listing, affordability, feeChecklist, trustChecklist, localFit, estimatedMonthlyCost, missing });
-  const recommendation = recommend({ affordability, risk, feeChecklist, trustChecklist, localFit, missing });
+  const affordability = affordabilityLabel(estimatedMonthlyCost, search.monthlyBudget, { rent, missingRecurring, feeChecklist });
+  evidence.push(`Known monthly estimate is ${formatMoney(estimatedMonthlyCost)} vs. ${formatMoney(search.monthlyBudget)} budget (${affordability}).`);
+
+  const risk = riskLabel(feeChecklist, trustChecklist);
+  const score = scoreListing({ search, affordability, feeChecklist, trustChecklist, localFit, estimatedMonthlyCost, missing });
+  const recommendation = recommend({ affordability, risk, feeChecklist, trustChecklist, localFit });
   const missingInfo = missingInfoToAsk(missing, feeChecklist, trustChecklist, localFit);
 
   return {
@@ -102,6 +113,7 @@ export function analyzeListing(search, listing, index = 0) {
     url: clean(listing.url),
     address: clean(listing.address),
     neighborhood: clean(listing.neighborhood),
+    borough: clean(listing.borough),
     rent: Number.isFinite(rent) ? rent : null,
     estimatedMonthlyCost,
     affordability,
@@ -110,6 +122,7 @@ export function analyzeListing(search, listing, index = 0) {
     feeChecklist,
     trustChecklist,
     localFit,
+    topReasons: topReasons({ affordability, risk, feeChecklist, trustChecklist, localFit, estimatedMonthlyCost, budget: search.monthlyBudget }),
     missingInfo,
     supportingFacts: evidence.concat(score.reasons),
     score
@@ -125,6 +138,7 @@ export function normalizeListing(listing = {}) {
     rent: moneyToNumber(listing.rent),
     address: clean(listing.address),
     neighborhood: clean(listing.neighborhood),
+    borough: clean(listing.borough),
     contactName: clean(listing.contactName),
     managerName: clean(listing.managerName),
     contactMethod: clean(listing.contactMethod),
@@ -137,21 +151,49 @@ export function normalizeListing(listing = {}) {
   };
 }
 
+export function createFeedbackRecord({ analysis, feedbackAnswer, feedbackComment = '', contact = '', liveCtaClicked = false }) {
+  if (!analysis) throw new Error('Create a shortlist before saving feedback.');
+  return {
+    recordedAt: new Date().toISOString(),
+    liveSiteUrl: LIVE_SITE_URL,
+    targetArea: analysis.targetArea,
+    completedShortlist: true,
+    listingsSubmitted: analysis.listingCount,
+    recommendationMix: analysis.recommendationMix,
+    feedbackAnswer: clean(feedbackAnswer) || 'unsure',
+    comment: clean(feedbackComment),
+    contact: clean(contact),
+    liveCtaClicked: Boolean(liveCtaClicked)
+  };
+}
+
 function buildFeeChecklist(listing, oneTimeFees) {
   const text = listingText(listing);
   const applicationFee = firstMoneyFor(/application fee|app fee/i, oneTimeFees, text);
-  const deposit = firstMoneyFor(/deposit|security/i, oneTimeFees, text);
-  const asksPaymentBeforeTour = Boolean(listing.paymentBeforeTour) || (BEFORE_TOUR_PATTERN.test(text) && /pay|payment|deposit|fee|send/i.test(text));
+  const deposit = firstMoneyFor(/deposit|security|move[- ]?in/i, oneTimeFees, text);
+  const brokerFee = explicitMoneyFor(/broker fee|broker's fee|broker/i, oneTimeFees);
+  const brokerFeeStatus = brokerFee != null ? 'stated' : /no[- ]?fee|no broker fee/i.test(text) ? 'claimed no-fee' : /broker|agent fee|fee apartment/i.test(text) ? 'unclear' : 'not stated';
+  const guarantorRequirement = /guarantor|required income|40x|80x|third-party guarantor/i.test(text) ? 'mentioned' : 'unknown';
+  const asksPaymentBeforeTour = Boolean(listing.paymentBeforeTour) || (BEFORE_TOUR_PATTERN.test(text) && /pay|payment|deposit|fee|send|zelle|wire|venmo/i.test(text));
   const backgroundCheckMentioned = Boolean(listing.backgroundCheckMentioned) || /background check|tenant screening|credit check|screening report/i.test(text);
   const refundabilityStated = Boolean(listing.refundabilityStated) || /refundable|non[- ]?refundable/i.test(text);
   const portabilityStated = Boolean(listing.portabilityStated) || /portable|reuse|transfer/i.test(text);
+  const unusuallyHighApplicationFee = applicationFee != null && applicationFee > 100;
+  const nonRefundableApplicationFee = applicationFee != null && /non[- ]?refundable[^.]{0,60}(application|app)/i.test(text);
 
   const flags = [];
   const facts = [];
   if (applicationFee == null) flags.push('Application fee is not stated.');
   else facts.push(`Application fee found: ${formatMoney(applicationFee)}.`);
+  if (unusuallyHighApplicationFee) flags.push(`Application fee is unusually high for a NYC trial (${formatMoney(applicationFee)}); confirm before applying.`);
+  if (nonRefundableApplicationFee) flags.push('Application fee appears non-refundable; confirm before paying.');
   if (deposit == null) flags.push('Security deposit or move-in deposit is not stated.');
-  else facts.push(`Deposit found: ${formatMoney(deposit)}.`);
+  else facts.push(`Deposit / move-in fee found: ${formatMoney(deposit)}.`);
+  if (brokerFee != null) facts.push(`Broker fee found: ${formatMoney(brokerFee)}.`);
+  if (brokerFeeStatus === 'claimed no-fee') facts.push('Listing claims no broker fee; confirm who pays the broker before applying.');
+  if (brokerFeeStatus === 'unclear' || brokerFeeStatus === 'not stated') flags.push('Broker fee / no-fee status is unclear.');
+  if (guarantorRequirement === 'mentioned') facts.push('Guarantor or income requirement is mentioned.');
+  else flags.push('Guarantor / income requirement is not stated.');
   if (asksPaymentBeforeTour) flags.push('Payment appears to be requested before a tour or signed lease.');
   if (backgroundCheckMentioned) facts.push('Background check or tenant screening is mentioned.');
   else flags.push('Background check / screening policy is not stated.');
@@ -162,6 +204,11 @@ function buildFeeChecklist(listing, oneTimeFees) {
   return {
     applicationFee,
     deposit,
+    brokerFee,
+    brokerFeeStatus,
+    guarantorRequirement,
+    unusuallyHighApplicationFee,
+    nonRefundableApplicationFee,
     backgroundCheckMentioned,
     refundabilityStated,
     portabilityStated,
@@ -177,7 +224,7 @@ function buildTrustChecklist(search, listing, estimatedMonthlyCost) {
   const addressMissing = !clean(listing.address);
   const highRiskSource = HIGH_RISK_SOURCE_PATTERN.test(source || '');
   const wireOrGiftCard = Boolean(listing.asksWireGiftCard) || WIRE_PAYMENT_PATTERN.test(text);
-  const duplicateSignal = Boolean(listing.duplicateSignal) || /copied|duplicate|reposted|same photos|stolen/i.test(text);
+  const duplicateSignal = Boolean(listing.duplicateSignal) || /copied|duplicate|reposted|same photos|stolen|too good to be true/i.test(text);
   const contactMismatch = Boolean(listing.contactMismatch) || (listing.contactName && listing.managerName && lower(listing.contactName) !== lower(listing.managerName));
   const managerVerified = Boolean(listing.managerVerified);
   const tooGoodToBeTrue = estimatedMonthlyCost > 0 && search.monthlyBudget > 0 && estimatedMonthlyCost < search.monthlyBudget * 0.65;
@@ -188,13 +235,13 @@ function buildTrustChecklist(search, listing, estimatedMonthlyCost) {
   else flags.push('Source platform is missing.');
   if (addressMissing) flags.push('Address is missing or incomplete.');
   else facts.push(`Address/neighborhood supplied: ${listing.address || listing.neighborhood}.`);
-  if (highRiskSource) flags.push('Source is a platform where copied rental scams are common; verify through official channels.');
+  if (highRiskSource) flags.push('Marketplace/social source: verify the address and manager through an official building or company channel.');
   if (wireOrGiftCard) flags.push('Listing mentions wire, gift-card, instant-transfer, crypto, or similar payment.');
   if (duplicateSignal) flags.push('Supplied text suggests duplicate/copied/reposted listing signals.');
   if (contactMismatch) flags.push('Contact and manager names do not match.');
   if (managerVerified) facts.push('User marked manager/property channel as verified.');
   else flags.push('Manager has not been verified through an official property/company channel.');
-  if (tooGoodToBeTrue) flags.push('Known monthly cost is far below the stated budget; compare against similar listings for too-good-to-be-true pricing.');
+  if (tooGoodToBeTrue) flags.push('Known monthly cost is far below budget; compare against similar NYC listings for too-good-to-be-true pricing.');
 
   return { source, addressMissing, highRiskSource, wireOrGiftCard, duplicateSignal, contactMismatch, managerVerified, tooGoodToBeTrue, facts, flags };
 }
@@ -206,8 +253,8 @@ function buildLocalFit(search, listing) {
   const commuteMinutes = numberOrNull(listing.commuteMinutes);
   const commuteDestination = clean(search.commuteDestination);
 
-  if (clean(listing.neighborhood)) notes.push(`Neighborhood: ${listing.neighborhood}.`);
-  else missing.push('neighborhood or cross streets');
+  if (clean(listing.neighborhood) || clean(listing.borough)) notes.push(`NYC area: ${[listing.neighborhood, listing.borough].filter(Boolean).join(', ')}.`);
+  else missing.push('NYC neighborhood/borough or cross streets');
 
   if (commuteDestination && commuteMinutes != null) {
     const threshold = search.commuteThresholdMinutes;
@@ -220,24 +267,27 @@ function buildLocalFit(search, listing) {
     missing.push(`commute time to ${commuteDestination}`);
   }
 
+  if (/subway|train|bus|ferry|mta|transit|station|express/i.test(text)) notes.push('Transit access is mentioned.');
+  else missing.push('nearest subway/transit details');
+
   for (const [pattern, label] of [[INTERNET_PATTERN, 'internet/remote work'], [PARKING_PATTERN, 'parking'], [PET_PATTERN, 'pets'], [LAUNDRY_PATTERN, 'laundry']]) {
     if (pattern.test(text)) notes.push(`${label} mentioned.`);
     else missing.push(`${label} details`);
   }
 
-  if (/review|rating|reputation|property manager|management/i.test(text)) notes.push('Manager reputation or reviews mentioned.');
-  else missing.push('property-manager reputation/reviews');
+  if (/review|rating|reputation|property manager|management|landlord/i.test(text)) notes.push('Building/manager reputation or reviews mentioned.');
+  else missing.push('building/manager reputation or reviews');
 
   return { notes, missing, commuteMinutes };
 }
 
 function scoreListing({ search, affordability, feeChecklist, trustChecklist, localFit, estimatedMonthlyCost, missing }) {
   const reasons = [];
-  let budgetScore = affordability === AFFORDABILITY.WITHIN ? 40 : affordability === AFFORDABILITY.NEAR ? 28 : 8;
-  if (estimatedMonthlyCost && estimatedMonthlyCost <= search.monthlyBudget * 0.8) budgetScore += 3;
+  let budgetScore = affordability === AFFORDABILITY.WITHIN ? 40 : affordability === AFFORDABILITY.NEAR ? 28 : affordability === AFFORDABILITY.MISSING ? 20 : 8;
+  if (estimatedMonthlyCost && estimatedMonthlyCost <= search.monthlyBudget * 0.8 && affordability !== AFFORDABILITY.MISSING) budgetScore += 3;
   const severeTrustFlags = [trustChecklist.wireOrGiftCard, trustChecklist.addressMissing, trustChecklist.contactMismatch, trustChecklist.duplicateSignal].filter(Boolean).length;
-  const severeFeeFlags = feeChecklist.asksPaymentBeforeTour ? 1 : 0;
-  const trustScore = Math.max(0, 35 - severeTrustFlags * 10 - severeFeeFlags * 14 - feeChecklist.flags.length * 2 - trustChecklist.flags.length);
+  const severeFeeFlags = [feeChecklist.asksPaymentBeforeTour, feeChecklist.unusuallyHighApplicationFee].filter(Boolean).length;
+  const trustScore = Math.max(0, 35 - severeTrustFlags * 10 - severeFeeFlags * 8 - feeChecklist.flags.length * 2 - trustChecklist.flags.length);
   const localScore = Math.max(0, 15 - localFit.missing.length * 2 - (localFit.notes.length ? 0 : 3));
   const completenessScore = Math.max(0, 10 - missing.length - feeChecklist.flags.length - Math.floor(trustChecklist.flags.length / 2));
   const total = Math.round(budgetScore + trustScore + localScore + completenessScore);
@@ -248,18 +298,29 @@ function scoreListing({ search, affordability, feeChecklist, trustChecklist, loc
 
 function riskLabel(feeChecklist, trustChecklist) {
   if (feeChecklist.asksPaymentBeforeTour || trustChecklist.wireOrGiftCard || trustChecklist.contactMismatch) return RISK.HIGH;
-  if (feeChecklist.applicationFee == null || feeChecklist.deposit == null) return RISK.HIGH;
+  if (feeChecklist.applicationFee == null || feeChecklist.deposit == null || feeChecklist.brokerFeeStatus === 'unclear' || feeChecklist.unusuallyHighApplicationFee) return RISK.HIGH;
   if (trustChecklist.addressMissing || trustChecklist.duplicateSignal || trustChecklist.tooGoodToBeTrue || !trustChecklist.managerVerified) return RISK.MEDIUM;
-  if (feeChecklist.flags.length + trustChecklist.flags.length > 3) return RISK.MEDIUM;
+  if (feeChecklist.flags.length + trustChecklist.flags.length > 4) return RISK.MEDIUM;
   return RISK.LOW;
 }
 
 function recommend({ affordability, risk, feeChecklist, trustChecklist, localFit }) {
   const severeScam = feeChecklist.asksPaymentBeforeTour || trustChecklist.wireOrGiftCard || trustChecklist.contactMismatch;
   const poorCommute = localFit.commuteMinutes != null && localFit.commuteMinutes > 0 && localFit.notes.some((note) => /over \d+ min target/.test(note));
-  if (severeScam || affordability === AFFORDABILITY.OVER && risk === RISK.HIGH) return RECOMMENDATION.SKIP;
+  if (severeScam || (affordability === AFFORDABILITY.OVER && risk === RISK.HIGH)) return RECOMMENDATION.SKIP;
   if (affordability === AFFORDABILITY.WITHIN && risk === RISK.LOW && !poorCommute) return RECOMMENDATION.TOUR;
   return RECOMMENDATION.ASK_FIRST;
+}
+
+function topReasons({ affordability, risk, feeChecklist, trustChecklist, localFit, estimatedMonthlyCost, budget }) {
+  const reasons = [`Known monthly cost is ${formatMoney(estimatedMonthlyCost)} against a ${formatMoney(budget)} budget (${affordability}).`];
+  if (risk === RISK.HIGH) reasons.push('High fee/trust risk requires answers before applying.');
+  if (feeChecklist.brokerFeeStatus === 'claimed no-fee') reasons.push('No-fee claim is present but should be confirmed.');
+  if (feeChecklist.brokerFee != null) reasons.push(`Broker fee is stated at ${formatMoney(feeChecklist.brokerFee)}.`);
+  if (trustChecklist.managerVerified) reasons.push('Manager/property channel is marked verified.');
+  else reasons.push('Manager/property channel still needs official verification.');
+  if (localFit.notes.length) reasons.push(localFit.notes[0]);
+  return reasons.slice(0, 4);
 }
 
 function missingInfoToAsk(missing, feeChecklist, trustChecklist, localFit) {
@@ -271,7 +332,9 @@ function missingInfoToAsk(missing, feeChecklist, trustChecklist, localFit) {
   ]).slice(0, 12);
 }
 
-function affordabilityLabel(estimatedMonthlyCost, budget) {
+function affordabilityLabel(estimatedMonthlyCost, budget, { rent, missingRecurring, feeChecklist }) {
+  const missingCostData = !Number.isFinite(rent) || missingRecurring.length > 0 || feeChecklist.applicationFee == null || feeChecklist.deposit == null || feeChecklist.brokerFeeStatus === 'unclear' || feeChecklist.brokerFeeStatus === 'not stated' || feeChecklist.guarantorRequirement === 'unknown';
+  if (missingCostData) return AFFORDABILITY.MISSING;
   if (estimatedMonthlyCost > budget) return AFFORDABILITY.OVER;
   if (estimatedMonthlyCost >= budget * 0.9) return AFFORDABILITY.NEAR;
   return AFFORDABILITY.WITHIN;
@@ -281,16 +344,22 @@ function missingRecurringCosts(listing, recurringFees) {
   const labels = recurringFees.map((fee) => lower(fee.label));
   const missing = [];
   const text = listingText(listing);
-  if (!labels.some((label) => /util|water|trash|electric|gas|internet/.test(label)) && !/utilities included|tenant pays|water|trash|electric|gas/i.test(text)) missing.push('utilities / monthly services');
-  if (!labels.some((label) => /parking|garage/.test(label)) && !/parking included|no parking|garage|street parking/i.test(text)) missing.push('parking cost');
-  if (!labels.some((label) => /pet/.test(label)) && !/no pets|pet rent|pet fee|dogs|cats/i.test(text)) missing.push('pet rent/fees');
+  if (!labels.some((label) => /util|water|trash|electric|gas|heat|internet/.test(label)) && !/utilities included|tenant pays|water|trash|electric|gas|heat included/i.test(text)) missing.push('utilities / monthly services');
+  if (!labels.some((label) => /parking|garage/.test(label)) && !/parking included|no parking|garage|street parking|no car/i.test(text)) missing.push('parking cost if needed');
+  if (!labels.some((label) => /pet/.test(label)) && !/no pets|pet rent|pet fee|dogs|cats/i.test(text)) missing.push('pet rent/fees if applicable');
+  if (!/laundry|washer|dryer|w\/d|laundromat/i.test(text)) missing.push('laundry cost/access');
   return missing;
 }
 
-function firstMoneyFor(pattern, fees, text) {
+function explicitMoneyFor(pattern, fees) {
   const explicit = fees.find((fee) => pattern.test(fee.label) && Number.isFinite(fee.amount));
-  if (explicit) return explicit.amount;
-  const match = text.match(new RegExp(`${pattern.source}[^$0-9]{0,20}\\$?([0-9][0-9,.]*)`, 'i'));
+  return explicit ? explicit.amount : null;
+}
+
+function firstMoneyFor(pattern, fees, text) {
+  const explicit = explicitMoneyFor(pattern, fees);
+  if (explicit != null) return explicit;
+  const match = text.match(new RegExp(`${pattern.source}[^$0-9]{0,28}\\$?([0-9][0-9,.]*)`, 'i'));
   return match ? moneyToNumber(match[1]) : null;
 }
 
@@ -309,7 +378,7 @@ function normalizeStringList(value) {
 }
 
 function listingText(listing) {
-  return [listing.title, listing.source, listing.url, listing.address, listing.neighborhood, listing.contactName, listing.managerName, listing.contactMethod, listing.notes, ...(listing.amenities || []), ...(listing.recurringFees || []).map((fee) => `${fee.label} ${fee.amount ?? ''}`), ...(listing.oneTimeFees || []).map((fee) => `${fee.label} ${fee.amount ?? ''}`)].filter(Boolean).join(' ');
+  return [listing.title, listing.source, listing.url, listing.address, listing.neighborhood, listing.borough, listing.contactName, listing.managerName, listing.contactMethod, listing.notes, ...(listing.amenities || []), ...(listing.recurringFees || []).map((fee) => `${fee.label} ${fee.amount ?? ''}`), ...(listing.oneTimeFees || []).map((fee) => `${fee.label} ${fee.amount ?? ''}`)].filter(Boolean).join(' ');
 }
 
 function sourceFromUrl(url) {
