@@ -3,11 +3,111 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Rental AI — Verified Shortlist Assistant</title>
+    <meta
+      name="description"
+      content="Rental AI helps NYC renters avoid surprise fees and scam-risk signals by turning rental needs and candidate listings into a tour, ask-first, or skip shortlist."
+    />
+    <title>Rental AI — Safer NYC rental search beta</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <main id="app" class="shell"></main>
-    <script type="module" src="./app.js"></script>
+    <main class="shell landing-shell">
+      <nav class="landing-nav" aria-label="Primary">
+        <a class="brand-mark" href="./" aria-label="Rental AI home">Rental AI</a>
+        <div class="nav-links">
+          <a href="#workflow">How it works</a>
+          <a href="#safety">What we check</a>
+          <a href="./demo.html">Prototype demo</a>
+        </div>
+      </nav>
+
+      <section class="landing-hero">
+        <div class="hero-copy">
+          <p class="eyebrow">NYC rental beta</p>
+          <h1>Find safer NYC rentals without surprise fees or scam-risk guesswork.</h1>
+          <p class="lede">
+            Rental AI is a beta concierge for apartment hunters: tell us what you need, share listings you are considering, and get a practical shortlist of what to tour, what to ask about first, and what to skip.
+          </p>
+          <div class="hero-actions">
+            <a
+              class="button-link"
+              data-beta-signup-link
+              data-ready-label="Join the Rental AI beta"
+              data-placeholder-label="Beta signup form coming soon"
+              href="#beta-signup-placeholder"
+            >Beta signup form coming soon</a>
+            <a class="button-link secondary-link" href="./demo.html">View prototype demo</a>
+          </div>
+          <p class="trust-note">No applications, payments, SSNs, or credential collection. We help you organize questions before you tour or apply.</p>
+        </div>
+        <aside class="landing-card hero-card" aria-label="Beta outcome preview">
+          <span class="card-kicker">Your shortlist</span>
+          <strong>Tour · Ask first · Skip</strong>
+          <p>Each candidate rental gets fee questions, trust signals, commute/local-fit notes, and missing details to verify through official channels.</p>
+        </aside>
+      </section>
+
+      <section id="workflow" class="landing-section" aria-labelledby="workflow-heading">
+        <div class="section-heading compact-heading">
+          <div>
+            <p class="eyebrow">Beta workflow</p>
+            <h2 id="workflow-heading">We turn messy rental research into a clear next step.</h2>
+          </div>
+        </div>
+        <div class="step-grid">
+          <article class="landing-card">
+            <span class="step-number">1</span>
+            <h3>Tell us what you need</h3>
+            <p>Budget, neighborhoods, move date, commute target, must-haves, pets, deal-breakers, and where you feel unsure.</p>
+          </article>
+          <article class="landing-card">
+            <span class="step-number">2</span>
+            <h3>We review candidate rentals</h3>
+            <p>Share listings you found, or let us help search. We compare rent, fee language, contact clues, commute fit, and missing facts.</p>
+          </article>
+          <article class="landing-card">
+            <span class="step-number">3</span>
+            <h3>Get a practical shortlist</h3>
+            <p>We return a focused tour / ask-first / skip list with the exact questions to ask before you schedule, apply, or send money.</p>
+          </article>
+        </div>
+      </section>
+
+      <section id="safety" class="landing-section split-section" aria-labelledby="safety-heading">
+        <div>
+          <p class="eyebrow">Built for NYC renter pain</p>
+          <h2 id="safety-heading">Know what to verify before the listing wastes your time.</h2>
+          <p class="lede small-lede">Rental AI does not guarantee legitimacy or provide legal advice. It does help you slow down and spot the questions that matter before touring or applying.</p>
+        </div>
+        <div class="checklist-card landing-card">
+          <h3>What we help check</h3>
+          <ul class="feature-list">
+            <li>Broker/no-fee claims, application fees, move-in totals, and utility or pet costs.</li>
+            <li>Payment-before-tour pressure, unsafe payment channels, missing address, and copied-looking marketplace text.</li>
+            <li>Commute tradeoffs, neighborhood fit, laundry/pet/internet needs, and manager/contact consistency.</li>
+            <li>Missing questions to ask the broker, landlord, or platform before you book a tour.</li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="landing-section cta-panel" aria-labelledby="signup-heading">
+        <div>
+          <p class="eyebrow">Limited beta</p>
+          <h2 id="signup-heading">Want help pressure-testing your NYC apartment shortlist?</h2>
+          <p>Join the beta and we’ll ask for the details needed to review your search safely. The signup form should not ask for SSNs, passwords, bank details, or application payments.</p>
+        </div>
+        <a
+          class="button-link"
+          data-beta-signup-link
+          data-ready-label="Sign up for the beta"
+          data-placeholder-label="Tally signup placeholder"
+          href="#beta-signup-placeholder"
+        >Tally signup placeholder</a>
+        <p id="beta-signup-placeholder" class="placeholder-note" data-beta-placeholder>
+          Placeholder CTA: the published Tally form URL has not been added yet. Set <code>BETA_SIGNUP_TALLY_URL</code> in <code>src/config.js</code> to enable these buttons.
+        </p>
+      </section>
+    </main>
+    <script type="module" src="./landing.js"></script>
   </body>
 </html>

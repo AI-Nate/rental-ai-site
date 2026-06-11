@@ -67,6 +67,39 @@ export function searchResultsToListingText(results = []) {
     .join('\n\n---\n\n');
 }
 
+export function matchStaticSearchResults(input = {}, results = [], limit = 10) {
+  const plan = buildListingSearchQueries(input);
+  const tokens = new Set([
+    ...normalizeStringList(input.targetArea),
+    ...normalizeStringList(input.bedrooms),
+    ...normalizeStringList(input.mustHaves),
+    ...normalizeStringList(input.dealBreakers),
+    ...normalizeStringList(input.commuteDestination),
+    ...plan.flatMap((item) => normalizeStringList(item.query))
+  ].map((token) => lower(token)).filter((token) => token.length > 2 && !STOP_SEARCH_TOKENS.has(token)));
+
+  return results
+    .map((result, index) => ({ result, index, score: scoreStaticResult(result, tokens, plan) }))
+    .filter((item) => item.score > 0 || item.index < limit)
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .slice(0, limit)
+    .map((item) => item.result);
+}
+
+const STOP_SEARCH_TOKENS = new Set(['the', 'and', 'for', 'with', 'near', 'rentals', 'rental', 'apartments', 'apartment', 'homes', 'home', 'site', 'www', 'com', 'under', 'from', 'this', 'that', 'within', 'days', 'next', 'access']);
+
+function scoreStaticResult(result, tokens, plan) {
+  const text = lower([result.title, result.link, result.source, result.snippet, result.query, result.profileLabel].filter(Boolean).join(' '));
+  let score = 0;
+  for (const token of tokens) {
+    if (text.includes(token)) score += 1;
+  }
+  if (plan.some((item) => clean(result.query) === item.query)) score += 4;
+  if (result.link) score += 1;
+  if (result.snippet) score += 1;
+  return score;
+}
+
 export function parseListingsFromText(text) {
   const raw = clean(text);
   if (!raw) return [];
