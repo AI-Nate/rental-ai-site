@@ -1,6 +1,6 @@
-import { LIVE_SITE_URL, analyzeSearch, createFeedbackRecord } from './shortlist.js';
+import { LIVE_SITE_URL, analyzeSearch, buildListingSearchQueries, createFeedbackRecord, parseListingsFromText } from './shortlist.js';
 
-const STORAGE_KEY = 'rental-ai-trial-feedback-v2';
+const STORAGE_KEY = 'rental-ai-trial-feedback-v3';
 const CTA_KEY = 'rental-ai-live-cta-clicked';
 
 const sampleListings = [
@@ -76,15 +76,39 @@ const sampleListings = [
   }
 ];
 
+const samplePlainText = sampleListings.map((listing) => {
+  const fees = [...(listing.recurringFees || []), ...(listing.oneTimeFees || [])]
+    .map((fee) => `${fee.label}: ${fee.amount == null ? 'unknown' : `$${fee.amount}`}`)
+    .join('; ');
+  return [
+    listing.title,
+    listing.url,
+    `$${listing.rent} rent`,
+    [listing.address, listing.neighborhood, listing.borough].filter(Boolean).join(' · '),
+    `Source: ${listing.source}`,
+    `Fees: ${fees}`,
+    `Commute: ${listing.commuteMinutes} minutes to Union Square`,
+    `Amenities: ${(listing.amenities || []).join(', ')}`,
+    `Manager: ${listing.managerName || 'unknown'}; contact: ${listing.contactName || listing.contactMethod || 'unknown'}`,
+    listing.notes
+  ].filter(Boolean).join('\n');
+}).join('\n\n---\n\n');
+
 const app = document.querySelector('#app');
 let currentAnalysis = null;
+let currentSearchPlan = [];
+let currentParsedListings = [];
 
 const state = {
   targetArea: 'Astoria / Crown Heights / Lower East Side, NYC',
   monthlyBudget: 3400,
+  bedrooms: 'studio or 1BR',
+  moveDate: 'within 60 days',
   commuteDestination: 'Union Square',
   commuteThresholdMinutes: 35,
-  listingsJson: JSON.stringify(sampleListings, null, 2)
+  mustHaves: 'laundry, subway access, cats ok, reliable internet',
+  dealBreakers: 'payment before tour, unclear broker fee, missing address',
+  listingText: samplePlainText
 };
 
 render();
@@ -94,34 +118,40 @@ function render() {
     <section class="hero">
       <div class="hero-copy">
         <p class="eyebrow">NYC renter trial · 5 apartment hunters needed</p>
-        <h1>Paste 3–10 NYC listings. Get a tour / ask-first / skip shortlist.</h1>
-        <p class="lede">Rental AI is validating whether a lightweight trust-and-budget layer helps real NYC renters make clearer decisions before paying fees or sharing personal data. It does not scrape listings, apply for apartments, process payments, guarantee legitimacy, or provide legal advice.</p>
+        <h1>Tell us what you need. We’ll search, then analyze the best leads.</h1>
+        <p class="lede">Rental AI now starts with a renter-needs interview instead of asking people to copy JSON. It builds targeted listing searches, accepts normal pasted listing text, and turns what it finds into a tour / ask-first / skip shortlist. It does not apply for apartments, process payments, guarantee legitimacy, or provide legal advice.</p>
         <div class="hero-actions">
           <a id="live-cta" class="button-link" href="${LIVE_SITE_URL}" target="_blank" rel="noreferrer">Open live trial site</a>
-          <span class="hint">Phase 0-safe: share this link only in approved posts or direct interview asks.</span>
+          <span class="hint">Phase 0-safe: use with approved posts or direct interview asks.</span>
         </div>
       </div>
       <aside class="trial-card" aria-label="Trial goal">
         <strong>Validation target</strong>
-        <span>5 completed NYC shortlist runs</span>
+        <span>5 completed renter-needs interviews + shortlist runs</span>
         <span>Ask: “Did this help you decide what to tour, ask about, or skip?”</span>
       </aside>
     </section>
 
-    <section class="panel input-panel" aria-labelledby="search-heading">
+    <section class="panel input-panel" aria-labelledby="needs-heading">
       <div class="section-heading">
         <div>
           <p class="eyebrow">Step 1</p>
-          <h2 id="search-heading">NYC area search details</h2>
+          <h2 id="needs-heading">Renter-needs interview</h2>
         </div>
         <button id="load-sample" class="secondary" type="button">Reload NYC sample</button>
       </div>
-      <form id="search-form" class="grid-form">
+      <form id="needs-form" class="grid-form">
         <label>Neighborhood / borough target
           <input name="targetArea" value="${escapeAttr(state.targetArea)}" placeholder="e.g., Astoria, Queens or Crown Heights, Brooklyn" />
         </label>
-        <label>Monthly housing budget
+        <label>Max monthly housing budget
           <input name="monthlyBudget" type="number" min="1" step="1" value="${escapeAttr(String(state.monthlyBudget))}" />
+        </label>
+        <label>Bedrooms / layout
+          <input name="bedrooms" value="${escapeAttr(state.bedrooms)}" placeholder="studio, 1BR, 2BR" />
+        </label>
+        <label>Move timing
+          <input name="moveDate" value="${escapeAttr(state.moveDate)}" placeholder="ASAP, July 1, within 60 days" />
         </label>
         <label>Commute destination
           <input name="commuteDestination" value="${escapeAttr(state.commuteDestination)}" placeholder="e.g., Union Square, FiDi, Midtown" />
@@ -129,12 +159,36 @@ function render() {
         <label>Commute threshold (minutes)
           <input name="commuteThresholdMinutes" type="number" min="1" step="1" value="${escapeAttr(String(state.commuteThresholdMinutes))}" />
         </label>
-        <label class="full">Listings JSON (3–10 listing URLs or pasted details)
-          <textarea name="listingsJson" spellcheck="false" rows="20">${escapeText(state.listingsJson)}</textarea>
+        <label class="span-2">Must-haves
+          <input name="mustHaves" value="${escapeAttr(state.mustHaves)}" placeholder="laundry, pets, elevator, subway, remote-work internet" />
+        </label>
+        <label class="full">Deal-breakers / risk concerns
+          <input name="dealBreakers" value="${escapeAttr(state.dealBreakers)}" placeholder="payment before tour, unclear broker fee, far commute, no pets" />
         </label>
         <div class="actions full">
-          <button type="submit">Create NYC shortlist</button>
-          <p class="hint">For better output, include source URL, rent, address/cross streets, borough/neighborhood, broker/no-fee claim, application fee, deposit, utilities, guarantor/income requirement, manager/contact info, commute estimate, subway access, laundry, pets, and notes from the listing text.</p>
+          <button type="submit">Build search plan</button>
+          <p class="hint">We’ll generate targeted listing searches from these answers. If a search API is connected later, this step can fetch candidates automatically; today it falls back to one-click search links and plain-text paste.</p>
+        </div>
+      </form>
+    </section>
+
+    <section id="search-plan" class="panel search-panel" aria-live="polite"></section>
+
+    <section class="panel input-panel" aria-labelledby="listing-text-heading">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Step 2</p>
+          <h2 id="listing-text-heading">Paste listing text — no JSON required</h2>
+          <p class="hint">Paste 3–10 listing snippets, listing pages, URLs with descriptions, or notes from the searches. Separate listings with a blank line or <code>---</code>.</p>
+        </div>
+      </div>
+      <form id="analysis-form" class="grid-form">
+        <label class="full">Listing details found from search
+          <textarea name="listingText" spellcheck="false" rows="18">${escapeText(state.listingText)}</textarea>
+        </label>
+        <div class="actions full">
+          <button type="submit">Analyze listings</button>
+          <p class="hint">The parser extracts rent, URL/source, neighborhood/borough, fee language, commute mentions, amenities, manager/contact clues, and risk language from normal pasted text.</p>
         </div>
       </form>
     </section>
@@ -144,40 +198,83 @@ function render() {
 
   document.querySelector('#live-cta').addEventListener('click', () => localStorage.setItem(CTA_KEY, 'true'));
   document.querySelector('#load-sample').addEventListener('click', () => {
-    state.listingsJson = JSON.stringify(sampleListings, null, 2);
+    Object.assign(state, {
+      targetArea: 'Astoria / Crown Heights / Lower East Side, NYC',
+      monthlyBudget: 3400,
+      bedrooms: 'studio or 1BR',
+      moveDate: 'within 60 days',
+      commuteDestination: 'Union Square',
+      commuteThresholdMinutes: 35,
+      mustHaves: 'laundry, subway access, cats ok, reliable internet',
+      dealBreakers: 'payment before tour, unclear broker fee, missing address',
+      listingText: samplePlainText
+    });
     render();
-    runAnalysis();
   });
-  document.querySelector('#search-form').addEventListener('submit', (event) => {
+  document.querySelector('#needs-form').addEventListener('submit', (event) => {
+    event.preventDefault();
+    updateNeedsFromForm(event.currentTarget);
+    currentSearchPlan = buildListingSearchQueries(state);
+    renderSearchPlan();
+  });
+  document.querySelector('#analysis-form').addEventListener('submit', (event) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    state.targetArea = String(form.get('targetArea') || '');
-    state.monthlyBudget = Number(form.get('monthlyBudget'));
-    state.commuteDestination = String(form.get('commuteDestination') || '');
-    state.commuteThresholdMinutes = Number(form.get('commuteThresholdMinutes'));
-    state.listingsJson = String(form.get('listingsJson') || '[]');
+    state.listingText = String(form.get('listingText') || '');
     runAnalysis();
   });
 
+  currentSearchPlan = buildListingSearchQueries(state);
+  renderSearchPlan();
   runAnalysis();
+}
+
+function updateNeedsFromForm(formElement) {
+  const form = new FormData(formElement);
+  state.targetArea = String(form.get('targetArea') || '');
+  state.monthlyBudget = Number(form.get('monthlyBudget'));
+  state.bedrooms = String(form.get('bedrooms') || '');
+  state.moveDate = String(form.get('moveDate') || '');
+  state.commuteDestination = String(form.get('commuteDestination') || '');
+  state.commuteThresholdMinutes = Number(form.get('commuteThresholdMinutes'));
+  state.mustHaves = String(form.get('mustHaves') || '');
+  state.dealBreakers = String(form.get('dealBreakers') || '');
+}
+
+function renderSearchPlan() {
+  const panel = document.querySelector('#search-plan');
+  if (!panel) return;
+  panel.innerHTML = `
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">Search plan</p>
+        <h2>Open targeted searches, then paste promising listings below</h2>
+        <p class="hint">Automatic API search is not connected in this static build, so this is the graceful fallback: targeted searches plus no-JSON analysis. Owner action needed for true background fetching is listed in the handoff report.</p>
+      </div>
+      <div class="budget-chip">${currentSearchPlan.length} searches</div>
+    </div>
+    <div class="search-links">
+      ${currentSearchPlan.map((item) => `<a class="search-link" href="${escapeAttr(item.url)}" target="_blank" rel="noreferrer"><strong>${escapeText(item.label)}</strong><span>${escapeText(item.query)}</span></a>`).join('')}
+    </div>
+  `;
 }
 
 function runAnalysis() {
   const results = document.querySelector('#results');
   try {
-    const listings = JSON.parse(state.listingsJson);
+    currentParsedListings = parseListingsFromText(state.listingText);
     currentAnalysis = analyzeSearch({
       targetArea: state.targetArea,
       monthlyBudget: state.monthlyBudget,
       commuteDestination: state.commuteDestination,
       commuteThresholdMinutes: state.commuteThresholdMinutes,
-      listings
+      listings: currentParsedListings
     });
     results.innerHTML = renderResults(currentAnalysis);
     wireFeedbackForm();
   } catch (error) {
     currentAnalysis = null;
-    results.innerHTML = `<section class="panel error"><h2>Can’t create shortlist yet</h2><p>${escapeText(error.message)}</p></section>`;
+    results.innerHTML = `<section class="panel error"><h2>Can’t create shortlist yet</h2><p>${escapeText(error.message)}</p><p class="hint">Try pasting at least 3 listing snippets with rent and source/URL. JSON still works if pasted as raw listing text, but it is no longer required.</p></section>`;
   }
 }
 
@@ -185,9 +282,9 @@ function renderResults(analysis) {
   return `
     <section class="panel summary-card">
       <div>
-        <p class="eyebrow">Step 2</p>
+        <p class="eyebrow">Step 3</p>
         <h2>Shortlist for ${escapeText(analysis.targetArea)}</h2>
-        <p>${analysis.listingCount} listings analyzed. Showing the top ${analysis.shortlist.length}; each card has one action, top reasons, and missing questions to ask before touring/applying.</p>
+        <p>${analysis.listingCount} listings analyzed from pasted text. Showing the top ${analysis.shortlist.length}; each card has one action, top reasons, and missing questions to ask before touring/applying.</p>
       </div>
       <div class="budget-chip">Budget: ${money(analysis.monthlyBudget)}</div>
     </section>
@@ -204,7 +301,7 @@ function renderListing(listing, index) {
       <div class="listing-header">
         <div>
           <p class="rank">#${index + 1} · ${escapeText(listing.source)}</p>
-          <h3>${escapeText(listing.title)}</h3>
+          <h3>${listing.url ? `<a href="${escapeAttr(listing.url)}" target="_blank" rel="noreferrer">${escapeText(listing.title)}</a>` : escapeText(listing.title)}</h3>
           <p class="muted">${escapeText([listing.address, listing.neighborhood, listing.borough].filter(Boolean).join(' · ') || 'Address/neighborhood missing')}</p>
         </div>
         <div class="score"><strong>${listing.score.total}</strong><span>/100</span></div>
@@ -235,7 +332,7 @@ function renderFeedbackPanel(analysis) {
     <section class="panel feedback-panel" aria-labelledby="feedback-heading">
       <div class="section-heading">
         <div>
-          <p class="eyebrow">Step 3</p>
+          <p class="eyebrow">Step 4</p>
           <h2 id="feedback-heading">Trial feedback capture</h2>
           <p>After each renter finishes a shortlist, save whether it helped them decide what to tour, ask about, or skip. Records stay in this browser and can be exported as JSONL for <code>feedback.jsonl</code>.</p>
         </div>

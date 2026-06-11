@@ -28,6 +28,188 @@ export const RECOMMENDATION = Object.freeze({
   SKIP: 'skip'
 });
 
+
+export function buildListingSearchQueries(input = {}) {
+  const targetArea = clean(input.targetArea) || 'NYC';
+  const budget = moneyToNumber(input.monthlyBudget);
+  const bedrooms = clean(input.bedrooms);
+  const commuteDestination = clean(input.commuteDestination);
+  const mustHaves = normalizeStringList(input.mustHaves);
+  const dealBreakers = normalizeStringList(input.dealBreakers);
+  const budgetText = Number.isFinite(budget) ? `under $${Math.round(budget)}` : '';
+  const bedroomText = bedrooms || 'apartment';
+  const intent = [targetArea, bedroomText, budgetText, ...mustHaves.slice(0, 3)].filter(Boolean).join(' ');
+  const riskTerms = ['no fee', 'broker fee', 'application fee', 'deposit'].concat(dealBreakers.slice(0, 2)).join(' ');
+  const commuteText = commuteDestination ? `near transit commute to ${commuteDestination}` : 'near transit';
+  const queries = [
+    { label: 'StreetEasy', query: `site:streeteasy.com rentals ${intent} ${commuteText}` },
+    { label: 'Apartments.com', query: `site:apartments.com apartments ${intent} ${riskTerms}` },
+    { label: 'Zillow', query: `site:zillow.com homes for rent ${intent} ${commuteText}` },
+    { label: 'Open web', query: `${targetArea} ${bedroomText} rental ${budgetText} ${mustHaves.join(' ')} ${riskTerms}` }
+  ];
+  return queries.map((item) => ({
+    ...item,
+    url: `https://www.google.com/search?q=${encodeURIComponent(item.query)}`
+  }));
+}
+
+export function parseListingsFromText(text) {
+  const raw = clean(text);
+  if (!raw) return [];
+
+  if (/^\s*\[/.test(raw)) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed.map(normalizeListing);
+    } catch {
+      // Fall through to plain-text parsing. The UI should never require users to fix JSON.
+    }
+  }
+
+  return splitListingBlocks(raw).map((block, index) => listingFromTextBlock(block, index)).filter((listing) => listing.title || listing.url || listing.rent != null);
+}
+
+function splitListingBlocks(text) {
+  const blocks = text
+    .split(/\n\s*(?:-{3,}|={3,}|\*{3,})\s*\n|\n\s*\n(?=\S)/g)
+    .map((block) => block.trim())
+    .filter(Boolean);
+  if (blocks.length > 1) return blocks;
+
+  const urlMatches = [...text.matchAll(/https?:\/\/\S+/gi)];
+  if (urlMatches.length <= 1) return [text.trim()];
+  return urlMatches.map((match, index) => {
+    const start = match.index || 0;
+    const end = index + 1 < urlMatches.length ? urlMatches[index + 1].index : text.length;
+    return text.slice(start, end).trim();
+  }).filter(Boolean);
+}
+
+function listingFromTextBlock(block, index) {
+  const lines = block.split(/\n+/).map(clean).filter(Boolean);
+  const url = firstMatch(block, /https?:\/\/[^\s)]+/i);
+  const rent = extractRent(block);
+  const oneTimeFees = extractOneTimeFees(block);
+  const recurringFees = extractRecurringFees(block);
+  const area = extractArea(block);
+  const address = extractAddress(lines);
+  const title = extractTitle(lines, { url, rent, address }) || `Listing ${index + 1}`;
+  const commuteMinutes = extractCommuteMinutes(block);
+  const source = extractSource(block, url);
+  const managerName = firstMatch(block, /(?:manager|management|landlord|broker|agent)\s*:?\s*([^\n;.]+)/i);
+  const contactName = firstMatch(block, /(?:contact|leasing)\s*:?\s*([^\n;.]+)/i);
+
+  return normalizeListing({
+    id: `parsed-${index + 1}`,
+    title,
+    source,
+    url,
+    rent,
+    address,
+    neighborhood: area.neighborhood,
+    borough: area.borough,
+    managerName,
+    contactName,
+    managerVerified: /official|verified|property website|management site|brokerage site/i.test(block),
+    backgroundCheckMentioned: /background check|credit check|screening/i.test(block),
+    refundabilityStated: /refundable|non[- ]?refundable/i.test(block),
+    portabilityStated: /portable|reuse|transfer/i.test(block),
+    recurringFees,
+    oneTimeFees,
+    amenities: extractAmenities(block),
+    commuteMinutes,
+    notes: block
+  });
+}
+
+function extractTitle(lines, { url, rent, address }) {
+  return lines.find((line) => {
+    if (line === url || line === address) return false;
+    if (/^https?:\/\//i.test(line)) return false;
+    if (/^(source|fees?|amenities|commute|manager|contact)\s*:/i.test(line)) return false;
+    if (rent != null && line.replace(/[$,]/g, '').includes(String(rent))) return false;
+    return /[A-Za-z]/.test(line);
+  });
+}
+
+function extractRent(text) {
+  const rentMatch = text.match(/(?:rent|monthly|price)\D{0,24}\$?([1-9][0-9]{2,5}(?:,[0-9]{3})?)/i)
+    || text.match(/\$([1-9][0-9]{2,5}(?:,[0-9]{3})?)\s*(?:\/\s*mo|per month|monthly|rent)?/i);
+  return rentMatch ? moneyToNumber(rentMatch[1]) : null;
+}
+
+function extractOneTimeFees(text) {
+  return [
+    feeFromText(text, /application fee|app fee/i, 'application fee'),
+    feeFromText(text, /security deposit|deposit|move[- ]?in/i, 'security deposit'),
+    feeFromText(text, /broker fee|broker's fee|broker/i, 'broker fee')
+  ].filter(Boolean);
+}
+
+function extractRecurringFees(text) {
+  const fees = [
+    feeFromText(text, /internet|wi[- ]?fi|broadband/i, 'internet'),
+    feeFromText(text, /pet rent|pet fee|dog|cat/i, 'pet rent'),
+    feeFromText(text, /parking|garage/i, 'parking'),
+    feeFromText(text, /electric|gas|heat|water|utilities/i, 'utilities'),
+    feeFromText(text, /laundry|washer|dryer|w\/d/i, 'laundry')
+  ].filter(Boolean);
+  if (/utilities included|heat included|hot water included/i.test(text) && !fees.some((fee) => /util|heat|water/.test(fee.label))) fees.push({ label: 'utilities included', amount: 0 });
+  if (/no parking|no car/i.test(text) && !fees.some((fee) => /parking/.test(fee.label))) fees.push({ label: 'no parking needed', amount: 0 });
+  if (/no pets|cats ok|dogs ok|pet friendly/i.test(text) && !fees.some((fee) => /pet/.test(fee.label))) fees.push({ label: 'pet policy mentioned', amount: 0 });
+  if (/laundry/i.test(text) && !fees.some((fee) => /laundry/.test(fee.label))) fees.push({ label: 'laundry mentioned', amount: 0 });
+  return fees;
+}
+
+function feeFromText(text, pattern, label) {
+  const groupedPattern = `(?:${pattern.source})`;
+  const withDollar = text.match(new RegExp(`${groupedPattern}[^$\\n]{0,50}\\$([0-9][0-9,.]*)`, 'i'));
+  if (withDollar) return { label, amount: moneyToNumber(withDollar[1]) };
+  const plainAmount = text.match(new RegExp(`${groupedPattern}\\s*(?:is|:|=|amount)?\\s+([0-9][0-9,.]{1,})\\b`, 'i'));
+  if (plainAmount) return { label, amount: moneyToNumber(plainAmount[1]) };
+  if (pattern.test(text)) return { label, amount: null };
+  return null;
+}
+
+function extractArea(text) {
+  const borough = firstMatch(text, NYC_BOROUGH_PATTERN);
+  const neighborhoods = ['Astoria', 'Crown Heights', 'Lower East Side', 'Sunnyside', 'Williamsburg', 'Bushwick', 'Greenpoint', 'Park Slope', 'Harlem', 'Upper West Side', 'Upper East Side', 'Long Island City', 'Ridgewood', 'Bed-Stuy', 'Bedford-Stuyvesant'];
+  const neighborhood = neighborhoods.find((name) => new RegExp(`\\b${escapeRegExp(name)}\\b`, 'i').test(text)) || '';
+  return { neighborhood, borough };
+}
+
+function extractAddress(lines) {
+  return lines.find((line) => /\b\d{1,5}\b/.test(line) && /(street|st\b|avenue|ave\b|road|rd\b|place|pl\b|blvd|boulevard|drive|dr\b|lane|ln\b|court|ct\b|way|queens|brooklyn|manhattan|bronx)/i.test(line)) || '';
+}
+
+function extractCommuteMinutes(text) {
+  const match = text.match(/(\d{1,3})\s*(?:min|minutes)\b[^.\n]{0,40}(?:commute|to |subway|train)?/i)
+    || text.match(/(?:commute|train|subway)[^.\n]{0,40}?(\d{1,3})\s*(?:min|minutes)/i);
+  return match ? numberOrNull(match[1]) : null;
+}
+
+function extractSource(text, url) {
+  const stated = firstMatch(text, /source\s*:?\s*([^\n;.]+)/i);
+  return stated || sourceFromUrl(url) || (/facebook|marketplace/i.test(text) ? 'Facebook Marketplace' : 'source not specified');
+}
+
+function extractAmenities(text) {
+  const amenities = [];
+  for (const [pattern, label] of [[INTERNET_PATTERN, 'internet'], [PARKING_PATTERN, 'parking'], [PET_PATTERN, 'pets'], [LAUNDRY_PATTERN, 'laundry'], [/subway|train|bus|ferry|mta/i, 'transit nearby'], [/elevator/i, 'elevator']]) {
+    if (pattern.test(text)) amenities.push(label);
+  }
+  return amenities;
+}
+
+function firstMatch(text, pattern) {
+  const match = text.match(pattern);
+  return match ? clean(match[1] || match[0]) : '';
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 export function analyzeSearch(input) {
   const normalized = normalizeSearchInput(input);
   const analyzed = normalized.listings.map((listing, index) => analyzeListing(normalized, listing, index));
@@ -62,7 +244,7 @@ export function normalizeSearchInput(input) {
   }
 
   if (listings.length < 3 || listings.length > 10) {
-    throw new Error('Enter 3–10 rental listings to create a trustworthy shortlist.');
+    throw new Error('Paste details from 3–10 rental listings to create a trustworthy shortlist.');
   }
 
   return {
